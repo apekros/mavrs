@@ -1,0 +1,58 @@
+[package]
+name = "mavrs"
+version = "0.1.0"
+edition = "2024"
+description = "Typed async control of ArduPilot planes, copters, and quadplanes from a companion computer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/apekros/mavrs"
+readme = "README.md"
+keywords = ["mavlink", "ardupilot", "drone", "uav", "robotics"]
+categories = ["aerospace::drones", "aerospace::unmanned-aerial-vehicles", "asynchronous"]
+
+[dependencies]
+mavlink = { version = "0.18", default-features = false, features = [
+    "std",
+    "tokio",
+    "transport-tcp",
+    "transport-udp",
+    "transport-direct-serial",
+    "dialect-ardupilotmega",
+    "format-generated-code",
+] }
+# Not used directly. mavlink-core 0.18 imports futures::lock::Mutex but
+# declares futures with default-features = false and no features, so someone
+# in the graph has to turn "std" on or it does not compile.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+sguaba = { version = "0.10.4", default-features = false, features = ["std"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tracing = "0.1"
+uom = { version = "0.38.0", default-features = false, features = ["f64", "si", "std"] }
+
+[dev-dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+[lints.clippy]
+allow_attributes = { level = "deny", priority = 1 }
+# This crate's whole job is converting between MAVLink scaled integers and SI
+# floats, so f64->f32/int casts are inherent and each site is bounds-checked
+# by the protocol itself.
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_precision_loss = { level = "allow", priority = 1 }
+# Every fallible operation returns crate::Result and the Error enum documents
+# each failure mode; per-method "# Errors" sections would just repeat it.
+missing_errors_doc = { level = "allow", priority = 1 }
+pedantic = "warn"
+complexity = "warn"
+perf = "warn"
+suspicious = "warn"
+nursery = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+missing_docs_in_private_items = "warn"
+
+[lints.rust]
+missing_docs = "warn"
