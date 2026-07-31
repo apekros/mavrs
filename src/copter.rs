@@ -372,6 +372,26 @@ impl Copter {
             });
         }
 
+        self.send_body_motion_frame(setpoint, {
+            // ArduPilot's Copter handler still requires the legacy body-offset
+            // frame for body-resolved velocity and acceleration commands.
+            #[expect(
+                deprecated,
+                reason = "`ArduCopter` does not yet accept MAV_FRAME_BODY_FRD for this message"
+            )]
+            let frame = MavFrame::MAV_FRAME_BODY_OFFSET_NED;
+            frame
+        })
+        .await
+    }
+
+    /// Encode and send a body motion setpoint in a stack-specific frame.
+    pub(crate) async fn send_body_motion_frame(
+        &self,
+        setpoint: BodyMotionSetpoint,
+        coordinate_frame: MavFrame,
+    ) -> Result<()> {
+        validate_setpoint(setpoint)?;
         let mut mask = PositionTargetTypemask::POSITION_TARGET_TYPEMASK_X_IGNORE
             | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_Y_IGNORE
             | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_Z_IGNORE;
@@ -408,13 +428,6 @@ impl Copter {
         let [forward_acceleration, right_acceleration, down_acceleration] =
             acceleration.to_cartesian();
         let (target_system, target_component) = self.target().unwrap_or((0, 0));
-        // ArduPilot's Copter handler still requires the legacy body-offset
-        // frame for body-resolved velocity and acceleration commands.
-        #[expect(
-            deprecated,
-            reason = "`ArduCopter` does not yet accept MAV_FRAME_BODY_FRD for this message"
-        )]
-        let coordinate_frame = MavFrame::MAV_FRAME_BODY_OFFSET_NED;
         self.send(&MavMessage::SET_POSITION_TARGET_LOCAL_NED(
             SET_POSITION_TARGET_LOCAL_NED_DATA {
                 time_boot_ms: 0,

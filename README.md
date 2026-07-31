@@ -8,6 +8,10 @@ on a copter and ACRO on a plane, and a body-frame velocity looks exactly
 like a NED one. mavrs does the conversions at the wire boundary so the
 compiler catches this class of mistake.
 
+mavrs supports both ArduPilot and PX4. Their mode encodings, integer parameter
+encoding, mission indexing, and accepted setpoint frames differ, and those
+differences stay behind stack-specific typed APIs.
+
 ## Features
 
 - [`uom`](https://docs.rs/uom) quantities everywhere, no raw floats in the
@@ -16,6 +20,8 @@ compiler catches this class of mistake.
   NED don't mix
 - mode enums per platform (`Mode::Guided`, `CopterMode::Guided`) instead of
   `custom_mode` numbers
+- complete PX4 heartbeat mode decoding, managed multicopter Offboard,
+  fixed-wing Guided Course/ACRO, and confirmed VTOL transition APIs
 - commands wait for `COMMAND_ACK`, retry on timeout, follow `IN_PROGRESS`,
   rejection is an `Err`
 - telemetry (position, attitude, body IMU, battery, mode/armed) as
@@ -108,11 +114,39 @@ quad.upload_mission(&mission).await?;
 quad.start_mission().await?;
 ```
 
+PX4 uses a common mode system across airframes. Multicopter body motion runs
+in Offboard mode. A managed session handles the required setpoint priming,
+10 Hz watchdog feed, setpoint updates, and a Hold transition on shutdown:
+
+```rust
+use mavrs::{BodyMotionSetpoint, Px4Copter};
+
+let copter = Px4Copter::connect("udpin:0.0.0.0:14540").await?;
+copter.wait_ready(Duration::from_secs(30)).await?;
+let session = copter.start_offboard(setpoint).await?;
+
+session.set_setpoint(next_setpoint).await?;
+session.stop().await?;
+```
+
 ## Testing against SITL
 
-The integration tests in `tests/sitl.rs` fly real ArduPilot SITL instances
-end to end: fixed-wing guided flight and ACRO control, copter body-frame
-motion, tailsitter transitions, and complete VTOL missions.
+The integration tests fly real autopilots and physics simulators end to end.
+`tests/sitl.rs` covers ArduPilot fixed-wing guided flight and ACRO control,
+copter body-frame motion, tailsitter transitions, and complete VTOL missions.
+`tests/px4_sitl.rs` provides matching PX4 coverage using Gazebo Harmonic:
+fixed-wing takeoff/reposition, altitude and sustained course control, real
+ACRO response, managed multicopter Offboard body motion, confirmed VTOL
+transitions through `EXTENDED_SYS_STATE`, RTL landing, and a complete VTOL
+mission.
+
+The repository's Nix flake supplies Rust, the PX4 build toolchain, its Python
+dependencies, and Gazebo Harmonic from
+[`gazebros2nix`](https://github.com/Gepetto/gazebros2nix):
+
+```sh
+nix develop
+```
 
 You need an ArduPilot checkout with a built `sitl` target:
 
@@ -127,6 +161,21 @@ Point `MAVRS_ARDUPILOT_DIR` at the checkout (it defaults to
 
 ```sh
 cargo test --test sitl
+```
+
+For PX4, clone its source with submodules and build SITL from the Nix shell:
+
+```sh
+git clone --recursive https://github.com/PX4/PX4-Autopilot.git ~/work/PX4-Autopilot
+cd ~/work/PX4-Autopilot
+make px4_sitl
+```
+
+Point `MAVRS_PX4_DIR` at that checkout (it defaults to
+`~/work/PX4-Autopilot`), then run the four isolated headless Gazebo tests:
+
+```sh
+cargo test --test px4_sitl
 ```
 
 ## License

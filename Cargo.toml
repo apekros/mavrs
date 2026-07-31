@@ -2,11 +2,11 @@
 name = "mavrs"
 version = "0.1.0"
 edition = "2024"
-description = "Typed async control of ArduPilot planes, copters, and quadplanes from a companion computer"
+description = "Typed async control of ArduPilot and PX4 aircraft from a companion computer"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/apekros/mavrs"
 readme = "README.md"
-keywords = ["mavlink", "ardupilot", "drone", "uav", "robotics"]
+keywords = ["mavlink", "ardupilot", "px4", "drone", "uav"]
 categories = ["aerospace::drones", "aerospace::unmanned-aerial-vehicles", "asynchronous"]
 
 [dependencies]

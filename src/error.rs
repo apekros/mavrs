@@ -83,6 +83,10 @@ pub enum Error {
     #[error("cannot command an unknown ArduCopter mode")]
     UnknownCopterMode,
 
+    /// `Px4Mode::Unknown` cannot be commanded.
+    #[error("cannot command an unknown PX4 mode")]
+    UnknownPx4Mode,
+
     /// A Copter setpoint was sent outside the mode that accepts it.
     #[error("body motion requires Copter mode {required}, vehicle is in {actual}")]
     WrongCopterMode {
@@ -90,6 +94,15 @@ pub enum Error {
         required: crate::CopterMode,
         /// Current flight mode.
         actual: crate::CopterMode,
+    },
+
+    /// A PX4 setpoint was sent outside Offboard mode.
+    #[error("PX4 body motion requires mode {required}, vehicle is in {actual}")]
+    WrongPx4Mode {
+        /// Required flight mode.
+        required: crate::Px4Mode,
+        /// Current flight mode.
+        actual: crate::Px4Mode,
     },
 
     /// A body motion setpoint selected no controlled dimensions.

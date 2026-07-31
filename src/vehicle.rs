@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mavlink::dialects::ardupilotmega::{
-    ATTITUDE_DATA, COMMAND_INT_DATA, COMMAND_LONG_DATA, GLOBAL_POSITION_INT_DATA, HEARTBEAT_DATA,
-    MavAutopilot, MavCmd, MavMessage, MavModeFlag, MavParamType, MavResult, MavState,
-    MavSysStatusSensor, MavType, PARAM_REQUEST_READ_DATA, PARAM_SET_DATA, SCALED_IMU2_DATA,
-    SYS_STATUS_DATA, VFR_HUD_DATA,
+    ATTITUDE_DATA, COMMAND_INT_DATA, COMMAND_LONG_DATA, EXTENDED_SYS_STATE_DATA,
+    GLOBAL_POSITION_INT_DATA, HEARTBEAT_DATA, MavAutopilot, MavCmd, MavMessage, MavModeFlag,
+    MavParamType, MavResult, MavState, MavSysStatusSensor, MavType, MavVtolState,
+    PARAM_REQUEST_READ_DATA, PARAM_SET_DATA, SCALED_IMU2_DATA, SYS_STATUS_DATA, VFR_HUD_DATA,
 };
 use mavlink::{AsyncMavConnection, MavHeader, MessageData};
 use sguaba::engineering::Orientation;
@@ -148,8 +148,12 @@ struct Inner {
     events: broadcast::Sender<Event>,
     /// Discovered autopilot (system id, component id).
     target: watch::Sender<Option<(u8, u8)>>,
+    /// Flight stack advertised by the discovered autopilot.
+    autopilot: watch::Sender<Option<MavAutopilot>>,
     /// Mode / armed / prearm state.
     state: watch::Sender<VehicleState>,
+    /// Current VTOL flight configuration, when reported.
+    vtol_state: watch::Sender<Option<MavVtolState>>,
     /// Fused global position.
     position: watch::Sender<Option<Position>>,
     /// Attitude.
@@ -235,7 +239,9 @@ impl Vehicle {
             identity,
             events,
             target: watch::Sender::new(None),
+            autopilot: watch::Sender::new(None),
             state: watch::Sender::new(VehicleState::default()),
+            vtol_state: watch::Sender::new(None),
             position: watch::Sender::new(None),
             attitude: watch::Sender::new(None),
             flight_data: watch::Sender::new(None),
@@ -347,10 +353,22 @@ impl Vehicle {
         *self.inner.target.borrow()
     }
 
+    /// Flight stack advertised by the vehicle heartbeat.
+    #[must_use]
+    pub fn autopilot(&self) -> Option<MavAutopilot> {
+        *self.inner.autopilot.borrow()
+    }
+
     /// Current mode / armed / prearm snapshot.
     #[must_use]
     pub fn state(&self) -> VehicleState {
         *self.inner.state.borrow()
+    }
+
+    /// Current VTOL flight configuration, if reported by the autopilot.
+    #[must_use]
+    pub fn vtol_state(&self) -> Option<MavVtolState> {
+        *self.inner.vtol_state.borrow()
     }
 
     /// Latest fused global position, if any received yet.
@@ -387,6 +405,12 @@ impl Vehicle {
     #[must_use]
     pub fn state_watch(&self) -> watch::Receiver<VehicleState> {
         self.inner.state.subscribe()
+    }
+
+    /// Watch channel for VTOL flight configuration changes.
+    #[must_use]
+    pub fn vtol_state_watch(&self) -> watch::Receiver<Option<MavVtolState>> {
+        self.inner.vtol_state.subscribe()
     }
 
     /// Watch channel for position updates.
@@ -514,6 +538,16 @@ impl Vehicle {
             trace!(?command, attempt, "command sent");
             match self.wait_for_ack(&mut events, command).await {
                 Ok(()) => return Ok(()),
+                Err(
+                    err @ Error::CommandRejected {
+                        result: MavResult::MAV_RESULT_TEMPORARILY_REJECTED,
+                        ..
+                    },
+                ) => {
+                    debug!(?command, attempt, "command temporarily rejected, retrying");
+                    last_err = err;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
                 Err(err @ Error::CommandRejected { .. }) => return Err(err),
                 Err(err) => {
                     debug!(?command, attempt, %err, "command attempt failed, retrying");
@@ -569,7 +603,9 @@ impl Vehicle {
 
     /// Send an autopilot-specific custom mode command and wait for heartbeat
     /// confirmation. Prefer the typed `set_mode` on [`crate::Plane`] or
-    /// [`crate::Copter`], which know their platform's mode numbering.
+    /// [`crate::Copter`], which know their platform's mode numbering. PX4
+    /// splits its mode over two command parameters, so use
+    /// [`crate::Px4Vehicle::set_mode`] for PX4.
     pub async fn set_custom_mode(&self, custom_mode: u32) -> Result<VehicleState> {
         self.command_long(
             MavCmd::MAV_CMD_DO_SET_MODE,
@@ -635,6 +671,27 @@ impl Vehicle {
             .await
             .map_err(|_| Error::Timeout {
                 what: "vehicle state condition",
+                after: timeout,
+            })?
+    }
+
+    /// Wait until the autopilot reports a particular VTOL configuration.
+    pub async fn wait_vtol_state(&self, expected: MavVtolState, timeout: Duration) -> Result<()> {
+        let mut rx = self.inner.vtol_state.subscribe();
+        let wait = async {
+            loop {
+                if *rx.borrow_and_update() == Some(expected) {
+                    return Ok::<(), Error>(());
+                }
+                if rx.changed().await.is_err() {
+                    return Err(Error::ConnectionClosed);
+                }
+            }
+        };
+        tokio::time::timeout(timeout, self.until_closed(wait))
+            .await
+            .map_err(|_| Error::Timeout {
+                what: "VTOL state",
                 after: timeout,
             })?
     }
@@ -721,10 +778,11 @@ impl Vehicle {
             MavParamType::MAV_PARAM_TYPE_REAL32 | MavParamType::MAV_PARAM_TYPE_REAL64 => value,
             _ => value.round(),
         };
+        let wire_value = encode_param_value(value, param_type, self.autopilot());
         let param_id = encode_param_name(name)?;
         let (target_system, target_component) = self.target_or_broadcast();
         let msg = MavMessage::PARAM_SET(PARAM_SET_DATA {
-            param_value: value,
+            param_value: wire_value,
             target_system,
             target_component,
             param_id: param_id.into(),
@@ -779,7 +837,10 @@ impl Vehicle {
                 continue;
             };
             if decode_param_name(&pv.param_id[..]) == name {
-                return Ok((pv.param_value, pv.param_type));
+                return Ok((
+                    decode_param_value(pv.param_value, pv.param_type, self.autopilot()),
+                    pv.param_type,
+                ));
             }
         }
     }
@@ -800,6 +861,41 @@ fn encode_param_name(name: &str) -> Result<[u8; 16]> {
 fn decode_param_name(id: &[u8]) -> String {
     let end = id.iter().position(|&b| b == 0).unwrap_or(id.len());
     String::from_utf8_lossy(&id[..end]).into_owned()
+}
+
+/// Decode the legacy parameter protocol's stack-specific integer encoding.
+///
+/// PX4 advertises and uses byte-wise encoding, where an integer's bits occupy
+/// the `f32` field unchanged. `ArduPilot` uses the numeric cast encoding.
+fn decode_param_value(
+    value: f32,
+    param_type: MavParamType,
+    autopilot: Option<MavAutopilot>,
+) -> f32 {
+    if autopilot != Some(MavAutopilot::MAV_AUTOPILOT_PX4) {
+        return value;
+    }
+    match param_type {
+        // PX4's standard parameter service only exposes INT32 and REAL32.
+        MavParamType::MAV_PARAM_TYPE_INT32 => value.to_bits().cast_signed() as f32,
+        _ => value,
+    }
+}
+
+/// Encode a parameter value using the flight stack's legacy wire convention.
+fn encode_param_value(
+    value: f32,
+    param_type: MavParamType,
+    autopilot: Option<MavAutopilot>,
+) -> f32 {
+    if autopilot != Some(MavAutopilot::MAV_AUTOPILOT_PX4) {
+        return value;
+    }
+    match param_type {
+        // The value has already been rounded by set_param.
+        MavParamType::MAV_PARAM_TYPE_INT32 => f32::from_bits((value as i32).cast_unsigned()),
+        _ => value,
+    }
 }
 
 /// Convert a small integer (message id, custom mode) to the f32 `MAVLink`
@@ -853,6 +949,7 @@ fn handle_message(inner: &Inner, header: MavHeader, msg: &MavMessage) {
         MavMessage::VFR_HUD(flight_data) => handle_flight_data(inner, flight_data),
         MavMessage::SCALED_IMU2(imu) => handle_imu(inner, imu),
         MavMessage::SYS_STATUS(status) => handle_system_status(inner, status),
+        MavMessage::EXTENDED_SYS_STATE(state) => handle_extended_system_state(inner, state),
         MavMessage::STATUSTEXT(st) => {
             let end = st
                 .text
@@ -864,6 +961,13 @@ fn handle_message(inner: &Inner, header: MavHeader, msg: &MavMessage) {
         }
         _ => {}
     }
+}
+
+/// Update the current VTOL flight configuration.
+fn handle_extended_system_state(inner: &Inner, state: &EXTENDED_SYS_STATE_DATA) {
+    let value =
+        (state.vtol_state != MavVtolState::MAV_VTOL_STATE_UNDEFINED).then_some(state.vtol_state);
+    inner.vtol_state.send_replace(value);
 }
 
 /// Update global position and NED velocity telemetry.
@@ -943,8 +1047,14 @@ fn handle_system_status(inner: &Inner, status: &SYS_STATUS_DATA) {
         remaining,
     }));
     let prearm = MavSysStatusSensor::MAV_SYS_STATUS_PREARM_CHECK;
-    let prearm_ok = status.onboard_control_sensors_enabled.contains(prearm)
-        && status.onboard_control_sensors_health.contains(prearm);
+    let prearm_ok = if *inner.autopilot.borrow() == Some(MavAutopilot::MAV_AUTOPILOT_PX4) {
+        // PX4 publishes PREARM_CHECK only in the health field. ArduPilot
+        // follows the older present/enabled/health convention.
+        status.onboard_control_sensors_health.contains(prearm)
+    } else {
+        status.onboard_control_sensors_enabled.contains(prearm)
+            && status.onboard_control_sensors_health.contains(prearm)
+    };
     inner.state.send_if_modified(|state| {
         if state.prearm_ok == prearm_ok {
             false
@@ -957,7 +1067,10 @@ fn handle_system_status(inner: &Inner, status: &SYS_STATUS_DATA) {
 
 /// Handle a heartbeat: discover the autopilot and track mode/armed state.
 fn handle_heartbeat(inner: &Inner, header: MavHeader, hb: &HEARTBEAT_DATA) {
-    if hb.autopilot != MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA {
+    if !matches!(
+        hb.autopilot,
+        MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA | MavAutopilot::MAV_AUTOPILOT_PX4
+    ) {
         return;
     }
     if matches!(
@@ -980,6 +1093,7 @@ fn handle_heartbeat(inner: &Inner, header: MavHeader, hb: &HEARTBEAT_DATA) {
             true
         }
     });
+    inner.autopilot.send_replace(Some(hb.autopilot));
     let armed = hb
         .base_mode
         .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
@@ -1077,5 +1191,18 @@ mod tests {
             "expected ConnectionClosed, got {ready:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn px4_integer_parameters_use_bytewise_encoding() {
+        let autopilot = Some(MavAutopilot::MAV_AUTOPILOT_PX4);
+        let wire = encode_param_value(-42.0, MavParamType::MAV_PARAM_TYPE_INT32, autopilot);
+        assert_eq!(wire.to_bits(), (-42_i32).cast_unsigned());
+        let decoded = decode_param_value(wire, MavParamType::MAV_PARAM_TYPE_INT32, autopilot);
+        assert!((decoded + 42.0).abs() < f32::EPSILON);
+
+        let ardupilot = Some(MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA);
+        let encoded = encode_param_value(42.0, MavParamType::MAV_PARAM_TYPE_INT32, ardupilot);
+        assert!((encoded - 42.0).abs() < f32::EPSILON);
     }
 }

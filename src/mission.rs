@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use mavlink::dialects::ardupilotmega::{
-    MISSION_ACK_DATA, MISSION_COUNT_DATA, MISSION_ITEM_INT_DATA, MavCmd, MavFrame, MavMessage,
-    MavMissionResult,
+    MISSION_ACK_DATA, MISSION_COUNT_DATA, MISSION_ITEM_INT_DATA, MavAutopilot, MavCmd, MavFrame,
+    MavMessage, MavMissionResult,
 };
 use tokio::sync::broadcast;
 use tracing::{debug, trace};
@@ -80,8 +80,27 @@ impl MissionItem {
         }
     }
 
-    /// VTOL landing at a location (zero lat/lon lands at the current
-    /// position).
+    /// VTOL takeoff towards a global target.
+    ///
+    /// PX4 requires a real latitude and longitude for this mission item.
+    /// `ArduPilot` callers that only need a vertical climb can use
+    /// [`Self::vtol_takeoff`].
+    #[must_use]
+    pub fn vtol_takeoff_at(target: Target) -> Self {
+        Self {
+            command: MavCmd::MAV_CMD_NAV_VTOL_TAKEOFF,
+            frame: MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            params: [0.0; 4],
+            x: target.latitude_e7(),
+            y: target.longitude_e7(),
+            z: target.altitude_above_home.get::<meter>() as f32,
+        }
+    }
+
+    /// VTOL landing at a location.
+    ///
+    /// `ArduPilot` treats `None` as the current position. PX4 missions should
+    /// always provide a real target.
     #[must_use]
     pub fn vtol_land(target: Option<Target>) -> Self {
         let (x, y) = target.map_or((0, 0), |target| {
@@ -126,8 +145,8 @@ impl MissionItem {
 
 /// A mission: an ordered list of items.
 ///
-/// Item 0 (the home location) is added automatically on upload; do not
-/// include it.
+/// `ArduPilot`'s mission protocol home placeholder is added automatically when
+/// uploading to `ArduPilot`. PX4 receives exactly the items in this collection.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mission {
     /// The mission items, in execution order.
@@ -159,8 +178,9 @@ impl Vehicle {
     /// Upload a mission, replacing whatever is on the vehicle.
     pub async fn upload_mission(&self, mission: &Mission) -> Result<()> {
         let (target_system, target_component) = self.target().unwrap_or((0, 0));
-        // +1 for the implicit home item at seq 0.
-        let count = u16::try_from(mission.items().len() + 1)
+        let include_home = self.autopilot() == Some(MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA);
+        let wire_count = mission.items().len() + usize::from(include_home);
+        let count = u16::try_from(wire_count)
             .map_err(|_| Error::MissionRejected(MavMissionResult::MAV_MISSION_NO_SPACE))?;
 
         let mut events = self.messages();
@@ -183,7 +203,13 @@ impl Vehicle {
                 MissionUploadMsg::Ack(result) => return Err(Error::MissionRejected(result)),
             };
             trace!(seq = requested_seq, "mission item requested");
-            let item = build_item(mission, requested_seq, target_system, target_component)?;
+            let item = build_item(
+                mission,
+                requested_seq,
+                include_home,
+                target_system,
+                target_component,
+            )?;
             self.send(&MavMessage::MISSION_ITEM_INT(item)).await?;
         }
         Err(Error::MissionTransferStalled {
@@ -255,15 +281,16 @@ async fn next_mission_message(
     }
 }
 
-/// Build the wire item for a sequence number. Seq 0 is the implicit home
-/// placeholder (`ArduPilot` overwrites it with the actual home).
+/// Build the wire item for a sequence number, accounting for `ArduPilot`'s
+/// non-standard home placeholder.
 fn build_item(
     mission: &Mission,
     seq: u16,
+    include_home: bool,
     target_system: u8,
     target_component: u8,
 ) -> Result<MISSION_ITEM_INT_DATA> {
-    let item = if seq == 0 {
+    let item = if include_home && seq == 0 {
         MissionItem {
             command: MavCmd::MAV_CMD_NAV_WAYPOINT,
             frame: MavFrame::MAV_FRAME_GLOBAL,
@@ -273,12 +300,10 @@ fn build_item(
             z: 0.0,
         }
     } else {
-        *mission
-            .items()
-            .get(usize::from(seq) - 1)
-            .ok_or(Error::MissionRejected(
-                MavMissionResult::MAV_MISSION_INVALID_SEQUENCE,
-            ))?
+        let index = usize::from(seq) - usize::from(include_home);
+        *mission.items().get(index).ok_or(Error::MissionRejected(
+            MavMissionResult::MAV_MISSION_INVALID_SEQUENCE,
+        ))?
     };
     Ok(MISSION_ITEM_INT_DATA {
         param1: item.params[0],

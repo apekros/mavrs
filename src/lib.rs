@@ -1,6 +1,6 @@
 //! # mavrs
 //!
-//! Idiomatic async control of `ArduPilot` planes, copters, and quadplanes
+//! Idiomatic async control of `ArduPilot` and PX4 planes, copters, and VTOLs
 //! (including tailsitters) from a companion computer, built on
 //! [rust-mavlink](https://github.com/mavlink/rust-mavlink).
 //!
@@ -36,16 +36,16 @@
 //! # }
 //! ```
 //!
-//! For a multicopter, use [`Copter`] and [`BodyMotionSetpoint`] for typed
-//! body-frame GUIDED control. For a quadplane or tailsitter, use [`QuadPlane`],
-//! which adds VTOL takeoff, landing, and flight transitions on top of the full
-//! [`Plane`] API.
+//! For `ArduPilot`, use [`Copter`], [`Plane`], or [`QuadPlane`]. PX4's common
+//! mode system is represented by [`Px4Vehicle`], extended by [`Px4Copter`],
+//! [`Px4Plane`], and [`Px4Vtol`] for airframe-specific operations.
 
 mod copter;
 mod error;
 mod mission;
 mod modes;
 mod plane;
+mod px4;
 mod quadplane;
 mod types;
 mod vehicle;
@@ -55,6 +55,7 @@ pub use error::{Error, Result};
 pub use mission::{Mission, MissionItem};
 pub use modes::Mode;
 pub use plane::{AcroControl, AcroRateLimits, HeadingReference, Plane};
+pub use px4::{Px4Copter, Px4Mode, Px4OffboardSession, Px4Plane, Px4Vehicle, Px4Vtol};
 pub use quadplane::{QuadPlane, Transition};
 pub use types::{
     Attitude, Battery, BodyAcceleration, BodyRates, BodyVelocity, FlightData, ImuSample,

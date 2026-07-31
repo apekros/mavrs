@@ -29,7 +29,7 @@ pub enum Transition {
 
 impl Transition {
     /// The `MAV_VTOL_STATE` value for this transition.
-    const fn vtol_state(self) -> f32 {
+    pub(crate) const fn vtol_state(self) -> f32 {
         let state = match self {
             Self::Hover => MavVtolState::MAV_VTOL_STATE_MC,
             Self::ForwardFlight => MavVtolState::MAV_VTOL_STATE_FW,

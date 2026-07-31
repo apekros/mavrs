@@ -41,11 +41,12 @@ impl HeadingReference {
     }
 }
 
-/// Normalized pilot inputs for `ArduPlane` ACRO mode.
+/// Normalized pilot inputs for fixed-wing ACRO mode.
 ///
 /// Roll, pitch, and yaw are in `-1.0..=1.0`; throttle is in `0.0..=1.0`.
-/// `ArduPilot` maps the axis inputs through its ACRO rate and expo parameters,
-/// so these are deliberately called inputs rather than rate setpoints.
+/// Each flight stack maps the axis inputs through its own ACRO rate and expo
+/// parameters, so these are deliberately called inputs rather than rate
+/// setpoints.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AcroControl {
     /// Roll stick ratio, positive right.
