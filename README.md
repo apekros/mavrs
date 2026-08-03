@@ -1,32 +1,6 @@
 # mavrs
 
-## Why
-
-MAVLink on the wire is scaled integers and shared numbers: latitude is
-`i32` degrees times 1e7, velocity is `i16` cm/s, `custom_mode` 4 is GUIDED
-on a copter and ACRO on a plane, and a body-frame velocity looks exactly
-like a NED one. mavrs does the conversions at the wire boundary so the
-compiler catches this class of mistake.
-
-mavrs supports both ArduPilot and PX4. Their mode encodings, integer parameter
-encoding, mission indexing, and accepted setpoint frames differ, and those
-differences stay behind stack-specific typed APIs.
-
-## Features
-
-- [`uom`](https://docs.rs/uom) quantities everywhere, no raw floats in the
-  API
-- [`sguaba`](https://docs.rs/sguaba) frame markers, vehicle FRD and local
-  NED don't mix
-- mode enums per platform (`Mode::Guided`, `CopterMode::Guided`) instead of
-  `custom_mode` numbers
-- complete PX4 heartbeat mode decoding, managed multicopter Offboard,
-  fixed-wing Guided Course/ACRO, and confirmed VTOL transition APIs
-- commands wait for `COMMAND_ACK`, retry on timeout, follow `IN_PROGRESS`,
-  rejection is an `Err`
-- telemetry (position, attitude, body IMU, battery, mode/armed) as
-  `tokio::sync::watch` channels, `wait_*` helpers on top
-- `Vehicle::send` / `Vehicle::messages` for anything not wrapped
+Type safe wrappers for PX4 and ArduPilot behaviour targeted towards being used for offboard control.
 
 ## Quick start
 
