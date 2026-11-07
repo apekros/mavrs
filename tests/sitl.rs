@@ -1,8 +1,8 @@
 //! End-to-end tests against real `ArduPilot` `SITL` instances.
 //!
-//! Requires an `ArduPilot` checkout with a built `sitl` target. Point
-//! `MAVRS_ARDUPILOT_DIR` at it, or keep the default of
-//! `~/work/ardupilot`.
+//! Requires `MAVRS_ARDUPILOT_DIR` to point at an `ArduPilot` tree with
+//! `build/sitl/bin` and `Tools/autotest`. `nix develop` exports the packaged
+//! release build; a source checkout with `./waf plane copter` works too.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -39,14 +39,12 @@ fn init_tracing() {
 }
 
 /// Where the `ArduPilot` checkout lives.
-fn ardupilot_dir() -> PathBuf {
-    std::env::var_os("MAVRS_ARDUPILOT_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            PathBuf::from(home).join("work/ardupilot")
-        },
-        PathBuf::from,
-    )
+fn ardupilot_dir() -> Result<PathBuf> {
+    std::env::var_os("MAVRS_ARDUPILOT_DIR")
+        .map(PathBuf::from)
+        .context(
+            "MAVRS_ARDUPILOT_DIR is not set; enter `nix develop` or point it at an ArduPilot tree",
+        )
 }
 
 /// A running `SITL` instance, killed on drop.
@@ -76,7 +74,7 @@ impl Sitl {
         defaults: &[&str],
         extra_params: &[(&str, f32)],
     ) -> Result<Self> {
-        let dir = ardupilot_dir();
+        let dir = ardupilot_dir()?;
         let bin = dir.join("build/sitl/bin").join(binary);
         ensure!(
             bin.exists(),

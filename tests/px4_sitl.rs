@@ -1,8 +1,9 @@
-//! End-to-end tests against PX4 SITL with Gazebo Harmonic.
+//! End-to-end tests against PX4 SITL.
 //!
-//! Enter the repository's Nix development shell, then point
-//! `MAVRS_PX4_DIR` at a PX4-Autopilot checkout built with
-//! `make px4_sitl` (the default is `~/work/PX4-Autopilot`).
+//! `MAVRS_PX4_DIR` must point at a PX4 tree containing
+//! `build/px4_sitl_default`. `MAVRS_PX4_SIMULATOR` selects the physics: `gz`
+//! (default, Gazebo Harmonic) or `sih` (PX4's built-in simulator, which cannot
+//! fly the fixed-wing tests). `nix develop` exports a packaged Gazebo build.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -26,7 +27,7 @@ use mavrs::{
 };
 use tokio::process::{Child, Command};
 
-/// Gazebo lockstep speed multiplier.
+/// Simulation speed multiplier (Gazebo lockstep or SIH wall-clock scaling).
 const SPEEDUP: u32 = 4;
 
 /// Set up test logging (respects `RUST_LOG`).
@@ -37,22 +38,69 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Locate the PX4-Autopilot checkout.
-fn px4_dir() -> PathBuf {
-    std::env::var_os("MAVRS_PX4_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            PathBuf::from(home).join("work/PX4-Autopilot")
-        },
-        PathBuf::from,
-    )
+/// Locate the PX4 tree.
+fn px4_dir() -> Result<PathBuf> {
+    std::env::var_os("MAVRS_PX4_DIR")
+        .map(PathBuf::from)
+        .context("MAVRS_PX4_DIR is not set; enter `nix develop` or point it at a PX4 tree")
 }
 
-/// A PX4 and isolated Gazebo instance, terminated on drop.
+/// Physics backend PX4 runs against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Simulator {
+    /// PX4's built-in simulation-in-hardware, no external processes.
+    Sih,
+    /// Gazebo Harmonic, launched by PX4's startup scripts.
+    Gazebo,
+}
+
+impl Simulator {
+    /// Read `MAVRS_PX4_SIMULATOR`, defaulting to Gazebo, the only backend
+    /// every test can fly.
+    fn from_env() -> Result<Self> {
+        match std::env::var("MAVRS_PX4_SIMULATOR") {
+            Err(std::env::VarError::NotPresent) => Ok(Self::Gazebo),
+            Ok(value) => match value.as_str() {
+                "sih" => Ok(Self::Sih),
+                "gz" => Ok(Self::Gazebo),
+                other => bail!("MAVRS_PX4_SIMULATOR={other:?}, expected \"sih\" or \"gz\""),
+            },
+            Err(error) => Err(error).context("read MAVRS_PX4_SIMULATOR"),
+        }
+    }
+}
+
+/// Airframes exercised by these tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Airframe {
+    /// Fixed-wing plane.
+    Plane,
+    /// X-configuration quadcopter.
+    Quadcopter,
+    /// Quadplane-style standard VTOL.
+    StandardVtol,
+}
+
+impl Airframe {
+    /// `PX4_SIM_MODEL` for this airframe under a simulator.
+    const fn model(self, simulator: Simulator) -> &'static str {
+        match (self, simulator) {
+            (Self::Plane, Simulator::Sih) => "sihsim_airplane",
+            (Self::Plane, Simulator::Gazebo) => "gz_rc_cessna",
+            (Self::Quadcopter, Simulator::Sih) => "sihsim_quadx",
+            (Self::Quadcopter, Simulator::Gazebo) => "gz_x500",
+            (Self::StandardVtol, Simulator::Sih) => "sihsim_standard_vtol",
+            (Self::StandardVtol, Simulator::Gazebo) => "gz_standard_vtol",
+        }
+    }
+}
+
+/// A PX4 instance, plus its isolated Gazebo server when using Gazebo,
+/// terminated on drop.
 struct Px4Sitl {
     /// PX4 process.
     child: Child,
-    /// Process group shared by PX4 and the Gazebo server it launches.
+    /// Process group shared by PX4 and any simulator server it launches.
     process_group: u32,
     /// Per-test PX4 parameter and log storage.
     workdir: tempfile::TempDir,
@@ -61,19 +109,16 @@ struct Px4Sitl {
 }
 
 impl Px4Sitl {
-    /// Launch an isolated PX4/Gazebo model.
-    fn spawn(instance: u8, model: &str) -> Result<Self> {
-        let dir = px4_dir();
+    /// Launch an isolated PX4 instance flying `airframe`.
+    fn spawn(instance: u8, airframe: Airframe) -> Result<Self> {
+        let dir = px4_dir()?;
+        let simulator = Simulator::from_env()?;
         let build = dir.join("build/px4_sitl_default");
         let binary = build.join("bin/px4");
         let etc = build.join("etc");
-        let models = dir.join("Tools/simulation/gz/models");
-        let worlds = dir.join("Tools/simulation/gz/worlds");
-        let plugins = build.join("src/modules/simulation/gz_plugins");
-        let server_config = dir.join("src/modules/simulation/gz_bridge/server.config");
         ensure!(
             binary.exists() && etc.exists(),
-            "PX4 SITL build not found at {}; enter `nix develop` and run `make px4_sitl`, or set MAVRS_PX4_DIR",
+            "PX4 SITL build not found at {}; enter `nix develop` or point MAVRS_PX4_DIR at a PX4 tree built with `make px4_sitl`",
             build.display()
         );
 
@@ -86,24 +131,13 @@ impl Px4Sitl {
             .current_dir(workdir.path())
             .args(["-i", &instance.to_string(), "-d"])
             .arg(&etc)
-            .env("PX4_SIM_MODEL", model)
+            .env("PX4_SIM_MODEL", airframe.model(simulator))
             .env("PX4_SIM_SPEED_FACTOR", SPEEDUP.to_string())
-            .env("HEADLESS", "1")
-            .env("PX4_GZ_MODELS", &models)
-            .env("PX4_GZ_WORLDS", &worlds)
-            .env("PX4_GZ_PLUGINS", &plugins)
-            .env("PX4_GZ_SERVER_CONFIG", &server_config)
-            .env(
-                "GZ_SIM_RESOURCE_PATH",
-                join_search_paths("GZ_SIM_RESOURCE_PATH", [&models, &worlds])?,
-            )
-            .env(
-                "GZ_SIM_SYSTEM_PLUGIN_PATH",
-                join_search_paths("GZ_SIM_SYSTEM_PLUGIN_PATH", [&plugins])?,
-            )
-            .env("GZ_SIM_SERVER_CONFIG_PATH", &server_config)
-            // Gazebo Transport partitions isolate concurrently running worlds.
-            .env("GZ_PARTITION", format!("mavrs-px4-{instance}"))
+            .env("HEADLESS", "1");
+        if simulator == Simulator::Gazebo {
+            configure_gazebo(&mut command, &dir, &build, instance)?;
+        }
+        command
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log))
             .kill_on_drop(true);
@@ -133,6 +167,42 @@ impl Px4Sitl {
         }
         Ok(vehicle)
     }
+}
+
+/// Point PX4's Gazebo launcher at the checkout's models and plugins, and
+/// isolate this instance's world.
+fn configure_gazebo(
+    command: &mut Command,
+    dir: &std::path::Path,
+    build: &std::path::Path,
+    instance: u8,
+) -> Result<()> {
+    let models = dir.join("Tools/simulation/gz/models");
+    let worlds = dir.join("Tools/simulation/gz/worlds");
+    let plugins = build.join("src/modules/simulation/gz_plugins");
+    let server_config = dir.join("src/modules/simulation/gz_bridge/server.config");
+    ensure!(
+        models.exists() && plugins.exists(),
+        "Gazebo models or plugins missing under {}; build PX4 with Gazebo (the px4-gazebo shell) or set MAVRS_PX4_SIMULATOR=sih",
+        dir.display()
+    );
+    command
+        .env("PX4_GZ_MODELS", &models)
+        .env("PX4_GZ_WORLDS", &worlds)
+        .env("PX4_GZ_PLUGINS", &plugins)
+        .env("PX4_GZ_SERVER_CONFIG", &server_config)
+        .env(
+            "GZ_SIM_RESOURCE_PATH",
+            join_search_paths("GZ_SIM_RESOURCE_PATH", [&models, &worlds])?,
+        )
+        .env(
+            "GZ_SIM_SYSTEM_PLUGIN_PATH",
+            join_search_paths("GZ_SIM_SYSTEM_PLUGIN_PATH", [&plugins])?,
+        )
+        .env("GZ_SIM_SERVER_CONFIG_PATH", &server_config)
+        // Gazebo Transport partitions isolate concurrently running worlds.
+        .env("GZ_PARTITION", format!("mavrs-px4-{instance}"));
+    Ok(())
 }
 
 /// Prepend paths while preserving a search path inherited from the Nix shell.
@@ -170,7 +240,7 @@ impl Drop for Px4Sitl {
     }
 }
 
-/// Build a target offset from the vehicle's actual Gazebo home position.
+/// Build a target offset from the vehicle's actual simulated home position.
 fn offset_target(
     position: mavrs::Position,
     north_degrees: f64,
@@ -189,7 +259,7 @@ fn offset_target(
 #[tokio::test]
 async fn px4_plane_takeoff_guided_flight() -> Result<()> {
     init_tracing();
-    let mut sitl = Px4Sitl::spawn(0, "gz_rc_cessna")?;
+    let mut sitl = Px4Sitl::spawn(0, Airframe::Plane)?;
     let plane = Px4Plane::from_vehicle(sitl.connect().await?);
     plane.wait_ready(Duration::from_secs(90)).await?;
     plane.wait_armable(Duration::from_secs(120)).await?;
@@ -313,7 +383,7 @@ fn heading_error_deg(a: Angle, b: Angle) -> f64 {
 #[tokio::test]
 async fn px4_copter_offboard_body_motion() -> Result<()> {
     init_tracing();
-    let mut sitl = Px4Sitl::spawn(1, "gz_x500")?;
+    let mut sitl = Px4Sitl::spawn(1, Airframe::Quadcopter)?;
     let copter = Px4Copter::from_vehicle(sitl.connect().await?);
     copter.wait_ready(Duration::from_secs(90)).await?;
     copter.wait_armable(Duration::from_secs(120)).await?;
@@ -388,7 +458,7 @@ async fn px4_copter_offboard_body_motion() -> Result<()> {
 #[tokio::test]
 async fn px4_vtol_takeoff_transition() -> Result<()> {
     init_tracing();
-    let mut sitl = Px4Sitl::spawn(2, "gz_standard_vtol")?;
+    let mut sitl = Px4Sitl::spawn(2, Airframe::StandardVtol)?;
     let vtol = Px4Vtol::from_vehicle(sitl.connect().await?);
     vtol.wait_ready(Duration::from_secs(90)).await?;
     vtol.wait_armable(Duration::from_secs(120)).await?;
@@ -418,7 +488,7 @@ async fn px4_vtol_takeoff_transition() -> Result<()> {
 #[tokio::test]
 async fn px4_vtol_auto_mission() -> Result<()> {
     init_tracing();
-    let mut sitl = Px4Sitl::spawn(3, "gz_standard_vtol")?;
+    let mut sitl = Px4Sitl::spawn(3, Airframe::StandardVtol)?;
     let vtol = Px4Vtol::from_vehicle(sitl.connect().await?);
     vtol.wait_ready(Duration::from_secs(90)).await?;
     vtol.wait_armable(Duration::from_secs(120)).await?;

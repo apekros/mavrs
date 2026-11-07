@@ -108,48 +108,39 @@ session.stop().await?;
 These tests run the actual ArduPilot and PX4 software with simulated aircraft.
 They cover plane and copter flight, switching between hover and forward flight,
 and full missions. ArduPilot tests live in `tests/sitl.rs`. PX4 tests live in
-`tests/px4_sitl.rs` and use Gazebo Harmonic for the simulation.
+`tests/px4_sitl.rs`. Each test starts its own simulator, with no GUI.
 
-Start by entering the Nix shell. It includes Rust, the tools needed to build
-PX4, and Gazebo Harmonic:
+The default Nix shell has the pinned Rust toolchain (with clippy, rustfmt and
+rust-analyzer) plus both simulators, ready to run:
 
 ```sh
 nix develop
+cargo test --test sitl      # ArduPilot 4.7.2 Plane and Copter
+cargo test --test px4_sitl  # PX4 1.18.0-rc1 with Gazebo Harmonic
 ```
 
-### ArduPilot
+ArduPilot comes from the official prebuilt release binaries. PX4 and Gazebo
+Harmonic are built from source, so the first `nix develop` takes a long time.
+After that everything comes from the Nix store. The shell points
+`MAVRS_ARDUPILOT_DIR` and `MAVRS_PX4_DIR` at those builds. Override either to
+test against your own source tree; the tests expect the usual `build/sitl/bin`
+and `build/px4_sitl_default` layouts.
 
-In your ArduPilot source directory, build the plane and copter simulators:
+`MAVRS_PX4_SIMULATOR` picks the PX4 physics: `gz` (set by the shell) or `sih`,
+PX4's built-in simulator. `nix build .#px4-sitl-sih` builds PX4 without
+Gazebo in a few minutes. The copter and VTOL mission tests pass on it, but the
+SIH airplane cannot reliably take off from the ground, so the fixed-wing tests
+need Gazebo.
 
-```sh
-./waf configure --board sitl
-./waf plane
-./waf copter
-```
+### Building PX4 yourself
 
-If your ArduPilot source is somewhere other than `~/work/ardupilot`, set
-`MAVRS_ARDUPILOT_DIR` to that path. Then run the tests from the mavrs directory:
-
-```sh
-cargo test --test sitl
-```
-
-### PX4
-
-From the Nix shell, download PX4 and build its simulator:
+The `px4-gazebo` shell adds everything needed to build PX4 from a checkout:
 
 ```sh
-git clone --recursive https://github.com/PX4/PX4-Autopilot.git ~/work/PX4-Autopilot
-cd ~/work/PX4-Autopilot
-make px4_sitl
-```
-
-If you downloaded PX4 somewhere other than `~/work/PX4-Autopilot`, set
-`MAVRS_PX4_DIR` to that path. Return to the mavrs directory and run the tests.
-Each test starts its own simulation, with no GUI:
-
-```sh
-cargo test --test px4_sitl
+nix develop .#px4-gazebo
+git clone --recursive https://github.com/PX4/PX4-Autopilot.git ../PX4-Autopilot
+(cd ../PX4-Autopilot && make px4_sitl)
+MAVRS_PX4_DIR=$PWD/../PX4-Autopilot cargo test --test px4_sitl
 ```
 
 ## License
